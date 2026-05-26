@@ -63,18 +63,8 @@ QUALITY_PRESETS = {
 }
 
 DISALLOWED_PROMPT_TERMS = {
-    "nude",
-    "naked",
-    "undress",
-    "undressed",
-    "remove all clothes",
-    "remove her clothes",
-    "remove his clothes",
-    "fully nude",
-    "topless",
     "explicit",
     "porn",
-    "sex",
 }
 
 BASE_DIR.mkdir(parents=True, exist_ok=True)
