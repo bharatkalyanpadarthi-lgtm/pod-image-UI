@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Start/restart the saved RunPod FireRed image-editing pod and deploy the UI.
-# Requires either ./.bin/runpodctl in this clone, or runpodctl on PATH.
+# Uses runpodctl when available, otherwise falls back to RunPod REST API.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -29,6 +29,61 @@ json_get() {
   python3 -c "import json,sys; d=json.load(sys.stdin); v=${expr}; print('' if v is None else v)"
 }
 
+has_runpodctl() {
+  command -v "${RUNPODCTL}" >/dev/null 2>&1 || [ -x "${RUNPODCTL}" ]
+}
+
+runpod_api_key() {
+  if [ -n "${RUNPOD_API_KEY:-}" ]; then
+    printf '%s\n' "${RUNPOD_API_KEY}"
+    return 0
+  fi
+  python3 - <<'PY'
+import re
+from pathlib import Path
+p = Path.home() / ".runpod" / "config.toml"
+if not p.exists():
+    raise SystemExit(1)
+m = re.search(r"apikey\s*=\s*'([^']+)'", p.read_text())
+if not m:
+    raise SystemExit(1)
+print(m.group(1))
+PY
+}
+
+runpod_rest() {
+  local method="$1"
+  local path="$2"
+  local api_key
+  api_key="$(runpod_api_key)"
+  RUNPOD_API_KEY_VALUE="${api_key}" python3 - "${method}" "${path}" <<'PY'
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+method, path = sys.argv[1], sys.argv[2]
+api_key = os.environ["RUNPOD_API_KEY_VALUE"]
+url = f"https://rest.runpod.io/v1/{path.lstrip('/')}"
+data = b"" if method != "GET" else None
+req = urllib.request.Request(
+    url,
+    data=data,
+    method=method,
+    headers={"Authorization": f"Bearer {api_key}"},
+)
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = resp.read().decode("utf-8", "replace")
+except urllib.error.HTTPError as exc:
+    body = exc.read().decode("utf-8", "replace")
+    print(json.dumps({"error": body, "status": exc.code}))
+    raise SystemExit(1)
+print(body)
+PY
+}
+
 require_file() {
   if [ ! -f "$1" ]; then
     log "Missing required file: $1"
@@ -42,23 +97,24 @@ if [ -f "${VIDEO_UI_SCRIPT}" ]; then
   python3 -m py_compile "${VIDEO_UI_SCRIPT}"
 fi
 
-if ! command -v "${RUNPODCTL}" >/dev/null 2>&1 && [ ! -x "${RUNPODCTL}" ]; then
-  log "Missing runpodctl. Install it or place it at ./.bin/runpodctl."
-  exit 1
-fi
-
 log "Starting RunPod pod ${RUNPOD_POD_ID}..."
-start_output="$("${RUNPODCTL}" pod start "${RUNPOD_POD_ID}" 2>&1 || true)"
-if echo "${start_output}" | grep -qi "not enough free GPUs"; then
-  log "RunPod unavailable: no free GPU on the saved pod host."
-  exit 1
-fi
-if echo "${start_output}" | grep -qi '"error"'; then
-  log "RunPod start failed:"
-  log "${start_output}"
-  exit 1
-fi
-if [ -n "${start_output}" ]; then
+if has_runpodctl; then
+  start_output="$("${RUNPODCTL}" pod start "${RUNPOD_POD_ID}" 2>&1 || true)"
+  if echo "${start_output}" | grep -qi "not enough free GPUs"; then
+    log "RunPod unavailable: no free GPU on the saved pod host."
+    exit 1
+  fi
+  if echo "${start_output}" | grep -qi '"error"'; then
+    log "RunPod start failed:"
+    log "${start_output}"
+    exit 1
+  fi
+  if [ -n "${start_output}" ]; then
+    log "${start_output}"
+  fi
+else
+  log "runpodctl not found; using RunPod REST API."
+  start_output="$(runpod_rest POST "pods/${RUNPOD_POD_ID}/start")"
   log "${start_output}"
 fi
 
@@ -68,9 +124,15 @@ max_attempts=$((MAX_WAIT_MINUTES * 60 / POLL_SECONDS))
 ip=""
 port=""
 for attempt in $(seq 1 "${max_attempts}"); do
-  info_json="$("${RUNPODCTL}" ssh info "${RUNPOD_POD_ID}" 2>/dev/null || true)"
-  ip="$(json_get 'd.get("ip","")' <<<"${info_json}" 2>/dev/null || true)"
-  port="$(json_get 'd.get("port","")' <<<"${info_json}" 2>/dev/null || true)"
+  if has_runpodctl; then
+    info_json="$("${RUNPODCTL}" ssh info "${RUNPOD_POD_ID}" 2>/dev/null || true)"
+    ip="$(json_get 'd.get("ip","")' <<<"${info_json}" 2>/dev/null || true)"
+    port="$(json_get 'd.get("port","")' <<<"${info_json}" 2>/dev/null || true)"
+  else
+    info_json="$(runpod_rest GET "pods/${RUNPOD_POD_ID}" 2>/dev/null || true)"
+    ip="$(json_get 'd.get("publicIp","")' <<<"${info_json}" 2>/dev/null || true)"
+    port="$(json_get '((d.get("portMappings") or {}).get("22") or "")' <<<"${info_json}" 2>/dev/null || true)"
+  fi
   if [ -n "${ip}" ] && [ -n "${port}" ]; then
     break
   fi
