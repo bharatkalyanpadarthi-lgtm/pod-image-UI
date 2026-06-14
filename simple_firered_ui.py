@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import datetime as dt
 import json
+import os
 import shutil
 import sys
 import time
@@ -11,7 +12,7 @@ import zipfile
 from pathlib import Path
 
 import gradio as gr
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 sys.path.append("/workspace")
 try:
@@ -40,6 +41,7 @@ WORKSPACE_INPUT_DIR = Path("/workspace/input")
 WORKSPACE_OUTPUT_DIR = Path("/workspace/output")
 LORA_NAME = "FireRed-Image-Edit-1.1-Lightning-8steps-v1.2.safetensors"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+AUTO_DOWNLOAD_CHUNK_SIZE = 50
 RUN_STATE = {
     "stop_requested": False,
     "run_dir": None,
@@ -157,7 +159,37 @@ def apply_quality_preset(choice):
 def image_count(folder):
     if not folder.exists() or not folder.is_dir():
         return 0
-    return sum(1 for path in folder.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_EXTS)
+    return sum(1 for path in folder.rglob("*") if is_supported_image(path))
+
+
+def is_supported_image(path):
+    path = Path(path)
+    return path.is_file() and path.suffix.lower() in IMAGE_EXTS
+
+
+def uploaded_image_paths(files):
+    files = files or []
+    paths = [Path(file_obj.name) for file_obj in files if is_supported_image(Path(file_obj.name))]
+    return sorted(paths, key=lambda path: str(path).lower())
+
+
+def uploaded_folder_root(image_files):
+    if not image_files:
+        return None
+    parents = [str(path.parent) for path in image_files]
+    try:
+        return Path(os.path.commonpath(parents))
+    except Exception:
+        return image_files[0].parent
+
+
+def relative_output_stem(source_path, root):
+    source_path = Path(source_path)
+    try:
+        relative = source_path.relative_to(root)
+    except ValueError:
+        relative = source_path.name
+    return safe_name(str(relative).replace("/", "__"))
 
 
 def list_input_batches():
@@ -278,10 +310,22 @@ def wait_for_prompt(prompt_id, poll_seconds=2):
 
 
 def copy_to_comfy_input(source_path):
-    dest_name = f"simple_{int(time.time() * 1000)}_{safe_name(source_path.name)}{source_path.suffix.lower()}"
+    dest_name = f"simple_{int(time.time() * 1000)}_{safe_name(source_path.name)}.png"
     dest = COMFY_INPUT_DIR / dest_name
-    shutil.copy2(source_path, dest)
+    try:
+        with Image.open(source_path) as image:
+            image.load()
+            if image.mode not in {"RGB", "RGBA"}:
+                image = image.convert("RGB")
+            image.save(dest, format="PNG")
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise gr.Error(f"Unreadable image skipped: {source_path} ({exc})") from exc
     return dest_name
+
+
+def is_unreadable_image_error(exc):
+    text = str(exc).lower()
+    return "unreadable image skipped" in text or "cannot identify image file" in text
 
 
 def parse_prompts(prompt_text):
@@ -512,6 +556,7 @@ def edit_single(image, prompt, ref2, ref3, steps, guidance, seed):
     ref2_name = copy_optional_ref(ref2, "ref2")
     ref3_name = copy_optional_ref(ref3, "ref3")
     results = []
+    skipped_errors = []
 
     try:
         for prompt_index, one_prompt in enumerate(prompts, 1):
@@ -571,11 +616,7 @@ def edit_batch(files, prompt, ref2, ref3, steps, guidance, seed, progress=gr.Pro
 
 
 def uploaded_folder_info(files, batch_size, start_index, output_name):
-    files = files or []
-    image_files = sorted(
-        [Path(file_obj.name) for file_obj in files if Path(file_obj.name).suffix.lower() in IMAGE_EXTS],
-        key=lambda path: path.name.lower(),
-    )
+    image_files = uploaded_image_paths(files)
     total = len(image_files)
     batch_size = max(1, int(batch_size or 50))
     start_index = max(1, int(start_index or 1))
@@ -603,21 +644,28 @@ def estimate_minutes(source_count, prompt_count=1):
 
 
 def auto_folder_output_name(files, batch_size, start_index, prefix):
-    files = files or []
-    total = sum(1 for file_obj in files if Path(file_obj.name).suffix.lower() in IMAGE_EXTS)
+    image_files = uploaded_image_paths(files)
+    total = len(image_files)
     batch_size = max(1, int(batch_size or 50))
     start_index = max(1, int(start_index or 1))
     batch_number = ((start_index - 1) // batch_size) + 1
     clean_prefix = safe_name(prefix or "edited_batch")
     output_name = f"{clean_prefix}_{batch_number:03d}"
     end_index = min(total, start_index + batch_size - 1) if total else start_index + batch_size - 1
+    chunk_count = (total + AUTO_DOWNLOAD_CHUNK_SIZE - 1) // AUTO_DOWNLOAD_CHUNK_SIZE if total else 0
     status = (
         f"Auto name: '{output_name}'. "
         f"Batch {batch_number} will process image {start_index} to {end_index}. "
         f"Estimated time: {estimate_minutes(max(0, end_index - start_index + 1))}."
     )
     if total:
-        status = f"Detected {total} image(s). " + status
+        root = uploaded_folder_root(image_files)
+        status = (
+            f"Detected {total} image(s), including subfolders. "
+            f"Main selected folder on server: {root}. "
+            f"Run all will create {chunk_count} chunk ZIP(s), one after each {AUTO_DOWNLOAD_CHUNK_SIZE} output image(s). "
+            + status
+        )
     return output_name, status
 
 
@@ -634,10 +682,7 @@ def edit_uploaded_folder(files, output_name, batch_size, start_index, skip_compl
     prompts = parse_prompts(prompt)
     set_last_error("")
 
-    image_files = sorted(
-        [Path(file_obj.name) for file_obj in files if Path(file_obj.name).suffix.lower() in IMAGE_EXTS],
-        key=lambda path: path.name.lower(),
-    )
+    image_files = uploaded_image_paths(files)
     if not image_files:
         raise gr.Error("No supported images found in the selected folder.")
 
@@ -666,7 +711,7 @@ def edit_uploaded_folder(files, output_name, batch_size, start_index, skip_compl
     existing_names = set(existing_by_name)
     total_jobs = len(selected) * len(prompts)
     completed_jobs = 0
-    yield [], None, f"Starting {run_dir.name}. Processing {len(selected)} source image(s), {total_jobs} total edit(s).", ""
+    yield [], [], f"Starting {run_dir.name}. Processing {len(selected)} source image(s), {total_jobs} total edit(s).", ""
 
     try:
         for local_index, source_path in enumerate(progress.tqdm(selected, desc="Editing selected folder batch"), start_index):
@@ -681,40 +726,180 @@ def edit_uploaded_folder(files, output_name, batch_size, start_index, skip_compl
                         set_run_state(results=results)
                     completed_jobs += 1
                     status = f"Skipped existing result for image {local_index}. Completed/skipped {completed_jobs} of {total_jobs} edit(s)."
-                    yield results, None, status, ""
+                    yield results, [], status, ""
                     continue
                 status = (
                     f"Processing image {local_index} of {start_index + len(selected) - 1}; "
                     f"prompt {prompt_index} of {len(prompts)}. Completed {completed_jobs} of {total_jobs} edit(s)."
                 )
-                yield results, None, status, ""
+                yield results, [], status, ""
                 offset = (local_index - 1) * len(prompts) + prompt_index - 1
                 item_seed = int(seed) + offset if seed is not None and int(seed) >= 0 else -1
                 prefix = f"simple_firered/{run_dir.name}/{local_index:04d}_p{prompt_index:02d}_{safe_name(source_path.name)}"
-                output_path = run_comfy_one(source_path, one_prompt, steps, guidance, item_seed, prefix, ref2_name, ref3_name)
+                try:
+                    output_path = run_comfy_one(source_path, one_prompt, steps, guidance, item_seed, prefix, ref2_name, ref3_name)
+                except Exception as exc:
+                    if not is_unreadable_image_error(exc):
+                        raise
+                    completed_jobs += 1
+                    skipped_errors.append(f"{source_path}: {exc}")
+                    status = (
+                        f"Skipped unreadable image {local_index}. Completed/skipped {completed_jobs} of {total_jobs} edit(s). "
+                        f"Bad file: {source_path.name}"
+                    )
+                    yield results, [], status, "\n".join(skipped_errors[-20:])
+                    continue
                 final_path = run_dir / output_path.name
                 shutil.copy2(output_path, final_path)
                 results.append(str(final_path))
                 set_run_state(results=results)
                 completed_jobs += 1
-                yield results, None, f"Completed {completed_jobs} of {total_jobs} edit(s). Latest: {final_path.name}", ""
+                yield results, [], f"Completed {completed_jobs} of {total_jobs} edit(s). Latest: {final_path.name}", ""
     except StopRequested:
         zip_path = finish_partial(run_dir, results)
         status = f"Stopped. Completed {len(results)} output image(s)."
-        yield results, str(zip_path) if zip_path else None, status, ""
+        yield results, [str(zip_path)] if zip_path else [], status, ""
         return
     except Exception as exc:
         zip_path = finish_partial(run_dir, results)
         message = f"{type(exc).__name__}: {exc}"
         set_last_error(message)
         status = f"Error after {len(results)} completed output image(s). Partial ZIP is available if anything finished."
-        yield results, str(zip_path) if zip_path else None, status, message
+        yield results, [str(zip_path)] if zip_path else [], status, message
         return
 
     zip_path = make_zip_at(run_dir / f"{run_dir.name}.zip", results)
     set_run_state(results=results, label=f"Finished {run_dir.name}", stop_requested=False)
     status = f"Done. Processed {len(selected)} source image(s), created {len(results)} output image(s). Output folder: {run_dir}"
-    yield results, str(zip_path), status, ""
+    if skipped_errors:
+        status += f" Skipped {len(skipped_errors)} unreadable image(s)."
+    yield results, [str(zip_path)], status, "\n".join(skipped_errors[-20:])
+
+
+def edit_uploaded_folder_all(files, output_name, skip_completed, prompt, ref2, ref3, steps, guidance, seed, progress=gr.Progress(track_tqdm=True)):
+    if not files:
+        raise gr.Error("Select a folder first.")
+    prompts = parse_prompts(prompt)
+    set_last_error("")
+
+    image_files = uploaded_image_paths(files)
+    if not image_files:
+        raise gr.Error("No supported images found in the selected folder or its subfolders.")
+
+    source_root = uploaded_folder_root(image_files) or image_files[0].parent
+    clean_output = safe_name(output_name or f"firered_outputs_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    output_root = source_root / clean_output
+    if output_root.exists() and not skip_completed:
+        output_root = source_root / f"{clean_output}_{dt.datetime.now().strftime('%H%M%S')}"
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    set_run_state(run_dir=output_root, results=[], label=f"Running all images into {output_root.name}", stop_requested=False)
+    ref2_name = copy_optional_ref(ref2, "ref2")
+    ref3_name = copy_optional_ref(ref3, "ref3")
+
+    results = []
+    chunk_zips = []
+    skipped_errors = []
+    existing_paths = output_image_paths(output_root) if skip_completed else []
+    existing_by_name = {path.name: path for path in existing_paths}
+    existing_names = set(existing_by_name)
+    total_jobs = len(image_files) * len(prompts)
+    completed_jobs = 0
+    yielded_zips = []
+    chunk_size = AUTO_DOWNLOAD_CHUNK_SIZE
+    yield [], [], (
+        f"Starting all-image run. Found {len(image_files)} image(s), including subfolders. "
+        f"Saving outputs to {output_root}. A chunk ZIP will be updated every {chunk_size} output image(s)."
+    ), ""
+
+    def save_chunk_zip(force=False):
+        if not results:
+            return None
+        if not force and len(results) % chunk_size != 0:
+            return None
+        chunk_number = ((len(results) - 1) // chunk_size) + 1
+        chunk_start = (chunk_number - 1) * chunk_size
+        chunk_paths = [Path(path) for path in results[chunk_start : chunk_start + chunk_size] if Path(path).exists()]
+        if not chunk_paths:
+            return None
+        zip_path = output_root / f"{output_root.name}_chunk_{chunk_number:03d}_{len(chunk_paths):03d}_images.zip"
+        make_zip_at(zip_path, chunk_paths)
+        if str(zip_path) not in chunk_zips:
+            chunk_zips.append(str(zip_path))
+        return zip_path
+
+    try:
+        for source_index, source_path in enumerate(progress.tqdm(image_files, desc="Editing all selected folder images"), 1):
+            raise_if_stopped()
+            for prompt_index, one_prompt in enumerate(prompts, 1):
+                raise_if_stopped()
+                marker = f"{source_index:05d}_p{prompt_index:02d}_{relative_output_stem(source_path, source_root)}"
+                if skip_completed and any(marker in name for name in existing_names):
+                    skipped_path = next(existing_by_name[name] for name in existing_names if marker in name)
+                    if str(skipped_path) not in results:
+                        results.append(str(skipped_path))
+                        set_run_state(results=results)
+                    completed_jobs += 1
+                    save_chunk_zip()
+                    yield results, list(chunk_zips), f"Skipped existing result {completed_jobs} of {total_jobs}.", ""
+                    continue
+
+                status = (
+                    f"Processing source image {source_index} of {len(image_files)}; "
+                    f"prompt {prompt_index} of {len(prompts)}. Completed {completed_jobs} of {total_jobs} edit(s). "
+                    f"Outputs are saving into {output_root}."
+                )
+                yield results, list(chunk_zips), status, ""
+                offset = (source_index - 1) * len(prompts) + prompt_index - 1
+                item_seed = int(seed) + offset if seed is not None and int(seed) >= 0 else -1
+                prefix = f"simple_firered/{output_root.name}/{marker}"
+                try:
+                    output_path = run_comfy_one(source_path, one_prompt, steps, guidance, item_seed, prefix, ref2_name, ref3_name)
+                except Exception as exc:
+                    if not is_unreadable_image_error(exc):
+                        raise
+                    completed_jobs += 1
+                    skipped_errors.append(f"{source_path}: {exc}")
+                    status = (
+                        f"Skipped unreadable image {source_index}. Completed/skipped {completed_jobs} of {total_jobs}. "
+                        f"Bad file: {source_path.name}"
+                    )
+                    yield results, list(chunk_zips), status, "\n".join(skipped_errors[-20:])
+                    continue
+                final_path = output_root / f"{marker}{output_path.suffix.lower()}"
+                if final_path.exists():
+                    final_path = output_root / f"{marker}_{int(time.time() * 1000)}{output_path.suffix.lower()}"
+                shutil.copy2(output_path, final_path)
+                results.append(str(final_path))
+                set_run_state(results=results)
+                completed_jobs += 1
+                zip_path = save_chunk_zip()
+                if zip_path:
+                    yielded_zips = list(chunk_zips)
+                yield results, yielded_zips, f"Completed {completed_jobs} of {total_jobs}. Latest saved: {final_path.name}", ""
+    except StopRequested:
+        save_chunk_zip(force=True)
+        status = f"Stopped. Completed {len(results)} output image(s). Outputs are in {output_root}."
+        yield results, list(chunk_zips), status, ""
+        return
+    except Exception as exc:
+        save_chunk_zip(force=True)
+        message = f"{type(exc).__name__}: {exc}"
+        set_last_error(message)
+        status = f"Error after {len(results)} output image(s). Completed outputs remain in {output_root}."
+        yield results, list(chunk_zips), status, message
+        return
+
+    save_chunk_zip(force=True)
+    final_zip = output_root / f"{output_root.name}_all_outputs.zip"
+    make_zip_at(final_zip, results)
+    if str(final_zip) not in chunk_zips:
+        chunk_zips.append(str(final_zip))
+    set_run_state(results=results, label=f"Finished {output_root.name}", stop_requested=False)
+    status = f"Done. Processed {len(image_files)} source image(s), created {len(results)} output image(s). Output folder: {output_root}"
+    if skipped_errors:
+        status += f" Skipped {len(skipped_errors)} unreadable image(s)."
+    yield results, list(chunk_zips), status, "\n".join(skipped_errors[-20:])
 
 
 def edit_directory(input_dir, output_dir, prompt, ref2, ref3, steps, guidance, seed, limit, progress=gr.Progress(track_tqdm=True)):
@@ -730,7 +915,7 @@ def edit_directory(input_dir, output_dir, prompt, ref2, ref3, steps, guidance, s
     ref2_name = copy_optional_ref(ref2, "ref2")
     ref3_name = copy_optional_ref(ref3, "ref3")
 
-    images = sorted(path for path in in_dir.iterdir() if path.suffix.lower() in IMAGE_EXTS)
+    images = sorted(path for path in in_dir.rglob("*") if is_supported_image(path))
     if limit and int(limit) > 0:
         images = images[: int(limit)]
     if not images:
@@ -845,6 +1030,11 @@ with gr.Blocks(title="FireRed Simple Editor") as demo:
         )
 
     with gr.Tab("Select folder batch"):
+        gr.Markdown(
+            "Select a folder to include images from that folder and all subfolders. "
+            "Use Run all images to process everything in one queue; completed outputs are saved continuously, "
+            f"with a ZIP created every {AUTO_DOWNLOAD_CHUNK_SIZE} output image(s)."
+        )
         folder_files = gr.File(
             label="Select folder",
             file_count="directory",
@@ -863,8 +1053,9 @@ with gr.Blocks(title="FireRed Simple Editor") as demo:
             folder_refresh = gr.Button("Detect images / auto name")
             folder_next = gr.Button("Next batch")
             folder_run = gr.Button("Run this batch", variant="primary")
+            folder_run_all = gr.Button("Run all images", variant="primary")
         folder_gallery = gr.Gallery(label="Completed images", columns=4, height=520)
-        folder_zip = gr.File(label="Download completed batch ZIP")
+        folder_zip = gr.File(label="Download completed ZIP(s)", file_count="multiple")
         folder_files.change(
             auto_folder_output_name,
             inputs=[folder_files, folder_batch_size, folder_start_index, folder_output_prefix],
@@ -902,6 +1093,21 @@ with gr.Blocks(title="FireRed Simple Editor") as demo:
                 folder_output_name,
                 folder_batch_size,
                 folder_start_index,
+                folder_skip_completed,
+                prompt,
+                ref2,
+                ref3,
+                steps,
+                guidance,
+                seed,
+            ],
+            outputs=[folder_gallery, folder_zip, folder_status, folder_error],
+        )
+        folder_run_all.click(
+            edit_uploaded_folder_all,
+            inputs=[
+                folder_files,
+                folder_output_name,
                 folder_skip_completed,
                 prompt,
                 ref2,
@@ -1022,5 +1228,5 @@ if __name__ == "__main__":
     demo.queue(default_concurrency_limit=1).launch(
         server_name="0.0.0.0",
         server_port=7860,
-        allowed_paths=[str(OUTPUT_DIR), str(COMFY_OUTPUT_DIR), "/workspace"],
+        allowed_paths=[str(OUTPUT_DIR), str(COMFY_OUTPUT_DIR), "/workspace", "/tmp"],
     )

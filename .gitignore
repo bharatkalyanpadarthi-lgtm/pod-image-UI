@@ -1,0 +1,11 @@
+config.env
+vast.env
+r2.env
+rclone.conf
+.bin/
+.venv/
+.venv-vast/
+__pycache__/
+*.log
+*.pid
+.DS_Store

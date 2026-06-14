@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Start/restart the saved RunPod FireRed image-editing pod and deploy the UI.
+# Requires either ./.bin/runpodctl in this clone, or runpodctl on PATH.
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "${SCRIPT_DIR}"
+
+RUNPOD_POD_ID="${RUNPOD_POD_ID:-co7m3vw9bxkmc9}"
+MAX_WAIT_MINUTES="${MAX_WAIT_MINUTES:-20}"
+POLL_SECONDS="${POLL_SECONDS:-10}"
+UI_SCRIPT="${UI_SCRIPT:-${SCRIPT_DIR}/simple_firered_ui.py}"
+VIDEO_UI_SCRIPT="${VIDEO_UI_SCRIPT:-${SCRIPT_DIR}/simple_wan_video_ui.py}"
+SSH_KEY="${SSH_KEY:-${HOME}/.ssh/id_ed25519}"
+
+if [ -x "${SCRIPT_DIR}/.bin/runpodctl" ]; then
+  RUNPODCTL="${RUNPODCTL:-${SCRIPT_DIR}/.bin/runpodctl}"
+else
+  RUNPODCTL="${RUNPODCTL:-runpodctl}"
+fi
+
+log() {
+  printf '%s\n' "$*"
+}
+
+json_get() {
+  local expr="$1"
+  python3 -c "import json,sys; d=json.load(sys.stdin); v=${expr}; print('' if v is None else v)"
+}
+
+require_file() {
+  if [ ! -f "$1" ]; then
+    log "Missing required file: $1"
+    exit 1
+  fi
+}
+
+require_file "${UI_SCRIPT}"
+python3 -m py_compile "${UI_SCRIPT}"
+if [ -f "${VIDEO_UI_SCRIPT}" ]; then
+  python3 -m py_compile "${VIDEO_UI_SCRIPT}"
+fi
+
+if ! command -v "${RUNPODCTL}" >/dev/null 2>&1 && [ ! -x "${RUNPODCTL}" ]; then
+  log "Missing runpodctl. Install it or place it at ./.bin/runpodctl."
+  exit 1
+fi
+
+log "Starting RunPod pod ${RUNPOD_POD_ID}..."
+start_output="$("${RUNPODCTL}" pod start "${RUNPOD_POD_ID}" 2>&1 || true)"
+if echo "${start_output}" | grep -qi "not enough free GPUs"; then
+  log "RunPod unavailable: no free GPU on the saved pod host."
+  exit 1
+fi
+if echo "${start_output}" | grep -qi '"error"'; then
+  log "RunPod start failed:"
+  log "${start_output}"
+  exit 1
+fi
+if [ -n "${start_output}" ]; then
+  log "${start_output}"
+fi
+
+max_attempts=$((MAX_WAIT_MINUTES * 60 / POLL_SECONDS))
+[ "${max_attempts}" -ge 1 ] || max_attempts=1
+
+ip=""
+port=""
+for attempt in $(seq 1 "${max_attempts}"); do
+  info_json="$("${RUNPODCTL}" ssh info "${RUNPOD_POD_ID}" 2>/dev/null || true)"
+  ip="$(json_get 'd.get("ip","")' <<<"${info_json}" 2>/dev/null || true)"
+  port="$(json_get 'd.get("port","")' <<<"${info_json}" 2>/dev/null || true)"
+  if [ -n "${ip}" ] && [ -n "${port}" ]; then
+    break
+  fi
+  log "RunPod still waiting for SSH... (${attempt}/${max_attempts})"
+  sleep "${POLL_SECONDS}"
+done
+
+if [ -z "${ip}" ] || [ -z "${port}" ]; then
+  log "RunPod did not become SSH-ready within ${MAX_WAIT_MINUTES} minute(s)."
+  exit 1
+fi
+
+log "RunPod SSH ready: root@${ip}:${port}"
+log "Using SSH key: ${SSH_KEY}"
+
+scp -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -P "${port}" \
+  "${UI_SCRIPT}" "root@${ip}:/workspace/simple_firered_ui.py"
+if [ -f "${VIDEO_UI_SCRIPT}" ]; then
+  scp -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -P "${port}" \
+    "${VIDEO_UI_SCRIPT}" "root@${ip}:/workspace/simple_wan_video_ui.py"
+fi
+
+ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p "${port}" "root@${ip}" '
+  set -e
+  mkdir -p /workspace/logs
+  python3 -m pip install -U gradio pillow >/workspace/logs/simple_firered_ui_pip.log 2>&1 || {
+    tail -80 /workspace/logs/simple_firered_ui_pip.log
+    exit 1
+  }
+
+  if [ -f /workspace/logs/comfyui.pid ]; then
+    old="$(cat /workspace/logs/comfyui.pid || true)"
+    [ -n "$old" ] && kill "$old" 2>/dev/null || true
+  fi
+  if [ -f /workspace/logs/simple_firered_ui.pid ]; then
+    old="$(cat /workspace/logs/simple_firered_ui.pid || true)"
+    [ -n "$old" ] && kill "$old" 2>/dev/null || true
+  fi
+  sleep 2
+
+  comfy_dir=""
+  for dir in /workspace/runpod-slim/ComfyUI /workspace/ComfyUI /ComfyUI; do
+    if [ -d "$dir" ]; then
+      comfy_dir="$dir"
+      break
+    fi
+  done
+  if [ -z "$comfy_dir" ]; then
+    echo "Could not find ComfyUI directory on pod."
+    exit 1
+  fi
+
+  cd "$comfy_dir"
+  nohup python3 main.py --listen 0.0.0.0 --port 8188 --enable-cors-header \
+    > /workspace/logs/comfyui.log 2>&1 < /dev/null &
+  echo $! > /workspace/logs/comfyui.pid
+  sleep 12
+
+  nohup python3 /workspace/simple_firered_ui.py \
+    > /workspace/logs/simple_firered_ui.log 2>&1 < /dev/null &
+  echo $! > /workspace/logs/simple_firered_ui.pid
+  sleep 5
+
+  ps -p "$(cat /workspace/logs/simple_firered_ui.pid)" -o pid,cmd
+'
+
+ui_url="https://${RUNPOD_POD_ID}-7860.proxy.runpod.net"
+comfy_url="https://${RUNPOD_POD_ID}-8188.proxy.runpod.net"
+
+log ""
+log "READY"
+log "Provider: RunPod"
+log "Simple UI: ${ui_url}"
+log "ComfyUI:    ${comfy_url}"
+log "Cost:      about \$1.49/hr while running for the current A100 pod"
