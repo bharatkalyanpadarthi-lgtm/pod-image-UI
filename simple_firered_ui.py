@@ -64,6 +64,118 @@ QUALITY_PRESETS = {
     "Quality": (12, 1.2),
 }
 
+MOBILE_CSS = """
+#firered-app {
+    max-width: 1180px;
+    margin: 0 auto;
+}
+
+#firered-app .mobile-button-row button,
+#firered-app .mobile-primary-action button {
+    min-height: 48px;
+}
+
+#firered-app .mobile-status,
+#firered-app .mobile-error textarea,
+#firered-app .mobile-path textarea,
+#firered-app .mobile-path input {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+#firered-app .mobile-gallery {
+    min-height: 260px;
+}
+
+@media (max-width: 780px) {
+    #firered-app {
+        max-width: none;
+    }
+
+    #firered-app .gradio-container {
+        padding-left: 10px !important;
+        padding-right: 10px !important;
+    }
+
+    #firered-app h1 {
+        font-size: 1.45rem !important;
+        line-height: 1.2 !important;
+    }
+
+    #firered-app .mobile-stack {
+        flex-direction: column !important;
+        gap: 10px !important;
+    }
+
+    #firered-app .mobile-stack > *,
+    #firered-app .mobile-stack .form,
+    #firered-app .mobile-stack .block,
+    #firered-app .mobile-stack .wrap,
+    #firered-app .mobile-stack .gradio-column {
+        min-width: 0 !important;
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+
+    #firered-app .mobile-button-row {
+        flex-direction: column !important;
+        gap: 10px !important;
+    }
+
+    #firered-app .mobile-button-row button,
+    #firered-app .mobile-primary-action button,
+    #firered-app button {
+        width: 100% !important;
+        min-height: 50px !important;
+        white-space: normal !important;
+    }
+
+    #firered-app textarea,
+    #firered-app input,
+    #firered-app select {
+        font-size: 16px !important;
+    }
+
+    #firered-app .mobile-prompt textarea {
+        min-height: 132px !important;
+    }
+
+    #firered-app .mobile-gallery {
+        height: 360px !important;
+        max-height: 60vh !important;
+        overflow: auto !important;
+    }
+
+    #firered-app .mobile-image,
+    #firered-app .mobile-image > div {
+        min-height: 280px;
+    }
+
+    #firered-app .tab-nav {
+        overflow-x: auto !important;
+        flex-wrap: nowrap !important;
+        scrollbar-width: thin;
+    }
+
+    #firered-app .tab-nav button {
+        flex: 0 0 auto !important;
+        width: auto !important;
+        min-height: 44px !important;
+        padding-left: 12px !important;
+        padding-right: 12px !important;
+    }
+
+    #firered-app .file-preview,
+    #firered-app .file-preview a,
+    #firered-app .download,
+    #firered-app .download a {
+        max-width: 100% !important;
+        overflow-wrap: anywhere !important;
+        word-break: break-word !important;
+    }
+}
+"""
+
 DISALLOWED_PROMPT_TERMS = {
     "explicit",
     "porn",
@@ -957,7 +1069,7 @@ def edit_directory(input_dir, output_dir, prompt, ref2, ref3, steps, guidance, s
     return results, str(zip_path)
 
 
-with gr.Blocks(title="FireRed Simple Editor") as demo:
+with gr.Blocks(title="FireRed Simple Editor", css=MOBILE_CSS, elem_id="firered-app") as demo:
     gr.Markdown("# FireRed Simple Editor")
     gr.Markdown("Upload image(s), enter one edit prompt, run, then download the result.")
 
@@ -965,29 +1077,32 @@ with gr.Blocks(title="FireRed Simple Editor") as demo:
         label="Edit prompt(s). Put one prompt per line if you want multiple edits.",
         lines=3,
         placeholder="Example: Replace the background with a clean white studio background. Keep the subject unchanged.",
+        elem_classes=["mobile-prompt"],
     )
-    with gr.Row():
+    with gr.Row(elem_classes=["mobile-stack"]):
         prompt_preset = gr.Dropdown(
             choices=list(PROMPT_PRESETS.keys()),
             value="Custom",
             label="Prompt preset",
+            min_width=0,
         )
         quality_preset = gr.Dropdown(
             choices=list(QUALITY_PRESETS.keys()),
             value="Normal",
             label="Speed / quality preset",
+            min_width=0,
         )
 
     with gr.Accordion("Optional reference images", open=False):
         gr.Markdown("Use these when your prompt says things like: use reference image 2 as the clothing reference, or use reference image 3 as the accessory/style reference.")
-        with gr.Row():
-            ref2 = gr.Image(label="Reference image 2", type="pil")
-            ref3 = gr.Image(label="Reference image 3", type="pil")
+        with gr.Row(elem_classes=["mobile-stack"]):
+            ref2 = gr.Image(label="Reference image 2", type="pil", elem_classes=["mobile-image"])
+            ref3 = gr.Image(label="Reference image 3", type="pil", elem_classes=["mobile-image"])
 
-    with gr.Row():
-        steps = gr.Slider(4, 40, value=8, step=1, label="Steps")
-        guidance = gr.Slider(0.0, 6.0, value=1.0, step=0.1, label="Guidance")
-        seed = gr.Number(value=12345, precision=0, label="Seed (-1 for random)")
+    with gr.Row(elem_classes=["mobile-stack"]):
+        steps = gr.Slider(4, 40, value=8, step=1, label="Steps", min_width=0)
+        guidance = gr.Slider(0.0, 6.0, value=1.0, step=0.1, label="Guidance", min_width=0)
+        seed = gr.Number(value=12345, precision=0, label="Seed (-1 for random)", min_width=0)
     prompt_preset.change(
         apply_prompt_preset,
         inputs=[prompt_preset, prompt],
@@ -998,19 +1113,19 @@ with gr.Blocks(title="FireRed Simple Editor") as demo:
         inputs=[quality_preset],
         outputs=[steps, guidance],
     )
-    with gr.Row():
-        stop_after_button = gr.Button("Stop after current image")
-        stop_button = gr.Button("Stop now", variant="stop")
-        stop_status = gr.Markdown("No active stop request.")
-        stop_file = gr.File(label="Download partial ZIP")
+    with gr.Row(elem_classes=["mobile-button-row"]):
+        stop_after_button = gr.Button("Stop after current image", min_width=0)
+        stop_button = gr.Button("Stop now", variant="stop", min_width=0)
+        stop_status = gr.Markdown("No active stop request.", elem_classes=["mobile-status"])
+        stop_file = gr.File(label="Download partial ZIP", min_width=0)
     stop_after_button.click(stop_after_current_image, inputs=[], outputs=[stop_status, stop_file], queue=False)
     stop_button.click(stop_current_run, inputs=[], outputs=[stop_status, stop_file], queue=False)
 
     with gr.Tab("One image"):
-        with gr.Row():
-            single_input = gr.Image(label="Upload image", type="pil")
-            single_output = gr.Gallery(label="Edited result(s)", columns=2, height=520)
-        single_button = gr.Button("Run edit", variant="primary")
+        with gr.Row(elem_classes=["mobile-stack"]):
+            single_input = gr.Image(label="Upload image", type="pil", elem_classes=["mobile-image"])
+            single_output = gr.Gallery(label="Edited result(s)", columns=2, height=520, elem_classes=["mobile-gallery"])
+        single_button = gr.Button("Run edit", variant="primary", elem_classes=["mobile-primary-action"])
         single_file = gr.File(label="Download ZIP")
         single_button.click(
             edit_single,
@@ -1020,8 +1135,8 @@ with gr.Blocks(title="FireRed Simple Editor") as demo:
 
     with gr.Tab("Batch up to 100"):
         batch_files = gr.File(label="Upload images", file_count="multiple", file_types=["image"])
-        batch_button = gr.Button("Run batch", variant="primary")
-        batch_gallery = gr.Gallery(label="Edited images", columns=4, height=520)
+        batch_button = gr.Button("Run batch", variant="primary", elem_classes=["mobile-primary-action"])
+        batch_gallery = gr.Gallery(label="Edited images", columns=4, height=520, elem_classes=["mobile-gallery"])
         batch_zip = gr.File(label="Download ZIP")
         batch_button.click(
             edit_batch,
@@ -1040,21 +1155,21 @@ with gr.Blocks(title="FireRed Simple Editor") as demo:
             file_count="directory",
             file_types=["image"],
         )
-        with gr.Row():
-            folder_output_prefix = gr.Textbox(label="Output prefix", value="edited_batch")
-            folder_output_name = gr.Textbox(label="Output folder name (auto)", value="edited_batch_001")
-        with gr.Row():
-            folder_batch_size = gr.Number(label="Batch size", value=50, precision=0)
-            folder_start_index = gr.Number(label="Start image number", value=1, precision=0)
-            folder_skip_completed = gr.Checkbox(label="Resume: skip completed results", value=True)
-        folder_status = gr.Markdown("Select a folder to detect image count.")
-        folder_error = gr.Textbox(label="Error details", lines=3, interactive=False, visible=True)
-        with gr.Row():
-            folder_refresh = gr.Button("Detect images / auto name")
-            folder_next = gr.Button("Next batch")
-            folder_run = gr.Button("Run this batch", variant="primary")
-            folder_run_all = gr.Button("Run all images", variant="primary")
-        folder_gallery = gr.Gallery(label="Completed images", columns=4, height=520)
+        with gr.Row(elem_classes=["mobile-stack"]):
+            folder_output_prefix = gr.Textbox(label="Output prefix", value="edited_batch", elem_classes=["mobile-path"])
+            folder_output_name = gr.Textbox(label="Output folder name (auto)", value="edited_batch_001", elem_classes=["mobile-path"])
+        with gr.Row(elem_classes=["mobile-stack"]):
+            folder_batch_size = gr.Number(label="Batch size", value=50, precision=0, min_width=0)
+            folder_start_index = gr.Number(label="Start image number", value=1, precision=0, min_width=0)
+            folder_skip_completed = gr.Checkbox(label="Resume: skip completed results", value=True, min_width=0)
+        folder_status = gr.Markdown("Select a folder to detect image count.", elem_classes=["mobile-status"])
+        folder_error = gr.Textbox(label="Error details", lines=3, interactive=False, visible=True, elem_classes=["mobile-error"])
+        with gr.Row(elem_classes=["mobile-button-row"]):
+            folder_refresh = gr.Button("Detect images / auto name", min_width=0)
+            folder_next = gr.Button("Next batch", min_width=0)
+            folder_run = gr.Button("Run this batch", variant="primary", min_width=0)
+            folder_run_all = gr.Button("Run all images", variant="primary", min_width=0)
+        folder_gallery = gr.Gallery(label="Completed images", columns=4, height=520, elem_classes=["mobile-gallery"])
         folder_zip = gr.File(label="Download completed ZIP(s)", file_count="multiple")
         folder_files.change(
             auto_folder_output_name,
@@ -1121,11 +1236,11 @@ with gr.Blocks(title="FireRed Simple Editor") as demo:
 
     with gr.Tab("Batch history"):
         gr.Markdown("Use this to download completed folders again or check what already finished.")
-        with gr.Row():
-            history_choice = gr.Dropdown(label="Completed output folder", choices=list_output_runs(), interactive=True)
-            history_refresh = gr.Button("Refresh history")
-        history_status = gr.Markdown("Refresh after a batch finishes.")
-        history_gallery = gr.Gallery(label="Completed images", columns=4, height=520)
+        with gr.Row(elem_classes=["mobile-stack"]):
+            history_choice = gr.Dropdown(label="Completed output folder", choices=list_output_runs(), interactive=True, min_width=0)
+            history_refresh = gr.Button("Refresh history", min_width=0)
+        history_status = gr.Markdown("Refresh after a batch finishes.", elem_classes=["mobile-status"])
+        history_gallery = gr.Gallery(label="Completed images", columns=4, height=520, elem_classes=["mobile-gallery"])
         history_zip = gr.File(label="Download ZIP")
         demo.load(
             refresh_output_history,
@@ -1145,20 +1260,21 @@ with gr.Blocks(title="FireRed Simple Editor") as demo:
 
     with gr.Tab("Folder on pod"):
         gr.Markdown("Pick an uploaded batch, then run it. The output folder is filled automatically.")
-        with gr.Row():
+        with gr.Row(elem_classes=["mobile-stack"]):
             batch_choice = gr.Dropdown(
                 label="Uploaded image batch",
                 choices=list_input_batches(),
                 value=(list_input_batches()[0] if list_input_batches() else None),
                 interactive=True,
+                min_width=0,
             )
-            refresh_button = gr.Button("Refresh batches")
-        batch_status = gr.Markdown()
-        input_dir = gr.Textbox(label="Input folder on pod", value="/workspace/input/batch_001", interactive=False)
-        output_dir = gr.Textbox(label="Output folder on pod", value="/workspace/output/batch_001", interactive=True)
-        limit = gr.Number(label="Max images to process, 0 means all", value=0, precision=0)
-        dir_button = gr.Button("Run folder", variant="primary")
-        dir_gallery = gr.Gallery(label="Edited images", columns=4, height=520)
+            refresh_button = gr.Button("Refresh batches", min_width=0)
+        batch_status = gr.Markdown(elem_classes=["mobile-status"])
+        input_dir = gr.Textbox(label="Input folder on pod", value="/workspace/input/batch_001", interactive=False, elem_classes=["mobile-path"])
+        output_dir = gr.Textbox(label="Output folder on pod", value="/workspace/output/batch_001", interactive=True, elem_classes=["mobile-path"])
+        limit = gr.Number(label="Max images to process, 0 means all", value=0, precision=0, min_width=0)
+        dir_button = gr.Button("Run folder", variant="primary", elem_classes=["mobile-primary-action"])
+        dir_gallery = gr.Gallery(label="Edited images", columns=4, height=520, elem_classes=["mobile-gallery"])
         dir_zip = gr.File(label="Download ZIP")
         demo.load(
             refresh_batches,
@@ -1186,25 +1302,26 @@ with gr.Blocks(title="FireRed Simple Editor") as demo:
             gr.Markdown("Video UI is not installed yet.")
         else:
             gr.Markdown("Upload one image, describe the motion, run, then download the MP4.")
-            with gr.Row():
-                video_input = gr.Image(label="Input image", type="pil")
+            with gr.Row(elem_classes=["mobile-stack"]):
+                video_input = gr.Image(label="Input image", type="pil", elem_classes=["mobile-image"])
                 video_output = gr.Video(label="Result video")
             video_prompt = gr.Textbox(
                 label="Motion prompt",
                 lines=3,
                 value="natural slow head movement, subtle smile, realistic motion, cinematic lighting",
+                elem_classes=["mobile-prompt"],
             )
             video_negative = gr.Textbox(label="Negative prompt", lines=2, value=wan_video.NEGATIVE_PROMPT)
-            with gr.Row():
-                video_width = gr.Dropdown([480, 640, 704, 832], value=480, label="Width")
-                video_height = gr.Dropdown([480, 640, 704, 832], value=480, label="Height")
-                video_frames = gr.Slider(17, 81, value=33, step=8, label="Frames")
-                video_fps = gr.Slider(8, 24, value=16, step=1, label="FPS")
-            with gr.Row():
-                video_steps = gr.Slider(2, 12, value=4, step=1, label="Steps")
-                video_guidance = gr.Slider(1.0, 8.0, value=1.0, step=0.1, label="Guidance")
-                video_seed = gr.Number(value=12345, precision=0, label="Seed (-1 random)")
-            video_button = gr.Button("Run video", variant="primary")
+            with gr.Row(elem_classes=["mobile-stack"]):
+                video_width = gr.Dropdown([480, 640, 704, 832], value=480, label="Width", min_width=0)
+                video_height = gr.Dropdown([480, 640, 704, 832], value=480, label="Height", min_width=0)
+                video_frames = gr.Slider(17, 81, value=33, step=8, label="Frames", min_width=0)
+                video_fps = gr.Slider(8, 24, value=16, step=1, label="FPS", min_width=0)
+            with gr.Row(elem_classes=["mobile-stack"]):
+                video_steps = gr.Slider(2, 12, value=4, step=1, label="Steps", min_width=0)
+                video_guidance = gr.Slider(1.0, 8.0, value=1.0, step=0.1, label="Guidance", min_width=0)
+                video_seed = gr.Number(value=12345, precision=0, label="Seed (-1 random)", min_width=0)
+            video_button = gr.Button("Run video", variant="primary", elem_classes=["mobile-primary-action"])
             video_file = gr.File(label="Download MP4")
             video_button.click(
                 wan_video.run_video,
