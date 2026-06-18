@@ -42,7 +42,7 @@ SSH_KEY=/path/to/key ./start_image_ui.sh
 Current default pod:
 
 ```text
-v05gbydfntgi55
+39nyb71o4r4f5f
 ```
 
 Override:
