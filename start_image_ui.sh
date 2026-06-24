@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-RUNPOD_POD_ID="${RUNPOD_POD_ID:-39nyb71o4r4f5f}"
+RUNPOD_POD_ID="${RUNPOD_POD_ID:-rek8hrqadhx00k}"
 MAX_WAIT_MINUTES="${MAX_WAIT_MINUTES:-20}"
 POLL_SECONDS="${POLL_SECONDS:-10}"
 UI_SCRIPT="${UI_SCRIPT:-${SCRIPT_DIR}/simple_firered_ui.py}"
@@ -114,7 +114,11 @@ if has_runpodctl; then
   fi
 else
   log "runpodctl not found; using RunPod REST API."
-  start_output="$(runpod_rest POST "pods/${RUNPOD_POD_ID}/start")"
+  if ! start_output="$(runpod_rest POST "pods/${RUNPOD_POD_ID}/start")"; then
+    log "RunPod REST start failed:"
+    log "${start_output}"
+    exit 1
+  fi
   log "${start_output}"
 fi
 
@@ -123,6 +127,8 @@ max_attempts=$((MAX_WAIT_MINUTES * 60 / POLL_SECONDS))
 
 ip=""
 port=""
+pod_cost=""
+gpu_type=""
 for attempt in $(seq 1 "${max_attempts}"); do
   if has_runpodctl; then
     info_json="$("${RUNPODCTL}" ssh info "${RUNPOD_POD_ID}" 2>/dev/null || true)"
@@ -132,6 +138,8 @@ for attempt in $(seq 1 "${max_attempts}"); do
     info_json="$(runpod_rest GET "pods/${RUNPOD_POD_ID}" 2>/dev/null || true)"
     ip="$(json_get 'd.get("publicIp","")' <<<"${info_json}" 2>/dev/null || true)"
     port="$(json_get '((d.get("portMappings") or {}).get("22") or "")' <<<"${info_json}" 2>/dev/null || true)"
+    pod_cost="$(json_get 'd.get("costPerHr","")' <<<"${info_json}" 2>/dev/null || true)"
+    gpu_type="$(json_get '((d.get("machine") or {}).get("gpuTypeId") or "")' <<<"${info_json}" 2>/dev/null || true)"
   fi
   if [ -n "${ip}" ] && [ -n "${port}" ]; then
     break
@@ -207,4 +215,11 @@ log "READY"
 log "Provider: RunPod"
 log "Simple UI: ${ui_url}"
 log "ComfyUI:    ${comfy_url}"
-log "Cost:      about \$1.49/hr while running for the current A100 pod"
+if [ -n "${gpu_type}" ]; then
+  log "GPU:        ${gpu_type}"
+fi
+if [ -n "${pod_cost}" ]; then
+  log "Cost:      about \$${pod_cost}/hr while running"
+else
+  log "Cost:      check RunPod pod details for current hourly rate"
+fi
