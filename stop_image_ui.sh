@@ -43,9 +43,11 @@ if [ -n "${api_key}" ]; then
   RUNPOD_API_KEY_VALUE="${api_key}" python3 - "${RUNPOD_POD_ID}" <<'PY'
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 pod_id = sys.argv[1]
 api_key = os.environ["RUNPOD_API_KEY_VALUE"]
@@ -66,6 +68,49 @@ except urllib.error.HTTPError as exc:
 
 print(f"RunPod REST status: {payload.get('desiredStatus', 'unknown')}")
 print(f"Last status change: {payload.get('lastStatusChange', 'unknown')}")
+
+
+def parse_started_at(value):
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f %z UTC", "%Y-%m-%d %H:%M:%S %z UTC"):
+        try:
+            return datetime.strptime(value, fmt).astimezone(timezone.utc)
+        except ValueError:
+            pass
+    return None
+
+
+def parse_status_change(value):
+    if not value:
+        return None
+    match = re.search(r": ([A-Z][a-z]{2} [A-Z][a-z]{2} \d{2} \d{4} \d{2}:\d{2}:\d{2}) GMT([+-]\d{4})", value)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(" ".join(match.groups()), "%a %b %d %Y %H:%M:%S %z").astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def format_duration(hours):
+    total_seconds = max(0, int(round(hours * 3600)))
+    minutes, seconds = divmod(total_seconds, 60)
+    hours_part, minutes = divmod(minutes, 60)
+    return f"{hours_part}h {minutes}m {seconds}s"
+
+
+started_at = parse_started_at(payload.get("lastStartedAt"))
+stopped_at = parse_status_change(payload.get("lastStatusChange")) or datetime.now(timezone.utc)
+cost_per_hr = payload.get("costPerHr")
+
+if started_at and cost_per_hr is not None:
+    hours = max(0.0, (stopped_at - started_at).total_seconds() / 3600)
+    estimated_cost = hours * float(cost_per_hr)
+    print(f"Session duration: {format_duration(hours)}")
+    print(f"Session cost estimate: ${estimated_cost:.2f} at ${float(cost_per_hr):.2f}/hr")
+else:
+    print("Session cost estimate: unavailable; RunPod did not return start time or hourly rate.")
 PY
 else
   echo "No RunPod API key found for REST verification."
