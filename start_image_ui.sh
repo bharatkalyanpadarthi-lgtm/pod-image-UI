@@ -193,6 +193,11 @@ ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p "${port
     exit 1
   fi
 
+  manager_config="$comfy_dir/user/__manager/config.ini"
+  if [ -f "$manager_config" ]; then
+    sed -i "s/^network_mode = .*/network_mode = offline/" "$manager_config"
+  fi
+
   cd "$comfy_dir"
   nohup python3 main.py --listen 0.0.0.0 --port 8188 --enable-cors-header --disable-dynamic-vram \
     > /workspace/logs/comfyui.log 2>&1 < /dev/null &
