@@ -45,6 +45,8 @@ LORA_NAME = "FireRed-Image-Edit-1.1-Lightning-8steps-v1.2.safetensors"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 AUTO_DOWNLOAD_CHUNK_SIZE = 50
 COMFY_STATUS_TIMEOUT_SECONDS = float(os.environ.get("FIRERED_STATUS_TIMEOUT_SECONDS", "10"))
+COMFY_SUBMIT_TIMEOUT_SECONDS = float(os.environ.get("FIRERED_SUBMIT_TIMEOUT_SECONDS", "45"))
+COMFY_SUBMIT_RECOVERY_SECONDS = float(os.environ.get("FIRERED_SUBMIT_RECOVERY_SECONDS", "180"))
 COMFY_PROMPT_TIMEOUT_SECONDS = float(os.environ.get("FIRERED_PROMPT_TIMEOUT_SECONDS", "3600"))
 RUN_STATE = {
     "stop_requested": False,
@@ -412,8 +414,62 @@ def http_json(path, payload=None, timeout=30):
         return json.loads(response.read())
 
 
+def prompt_is_queued(queue_info, prompt_id):
+    for queue_name in ("queue_running", "queue_pending"):
+        for item in queue_info.get(queue_name, []):
+            if len(item) > 1 and item[1] == prompt_id:
+                return True
+    return False
+
+
 def queue_prompt(prompt):
-    return http_json("/prompt", {"prompt": prompt, "client_id": str(uuid.uuid4())})["prompt_id"]
+    prompt_id = str(uuid.uuid4())
+    payload = {
+        "prompt": prompt,
+        "client_id": str(uuid.uuid4()),
+        "prompt_id": prompt_id,
+    }
+    try:
+        response = http_json(
+            "/prompt",
+            payload,
+            timeout=COMFY_SUBMIT_TIMEOUT_SECONDS,
+        )
+        return response["prompt_id"]
+    except urllib.error.HTTPError:
+        raise
+    except (TimeoutError, socket.timeout, ConnectionError, urllib.error.URLError) as exc:
+        print(
+            f"ComfyUI prompt submission response was delayed for {prompt_id}: {exc}",
+            flush=True,
+        )
+
+    deadline = time.monotonic() + COMFY_SUBMIT_RECOVERY_SECONDS
+    while time.monotonic() < deadline:
+        raise_if_stopped()
+        try:
+            history = http_json(
+                f"/history/{prompt_id}",
+                timeout=COMFY_STATUS_TIMEOUT_SECONDS,
+            )
+            if prompt_id in history:
+                return prompt_id
+            queue_info = http_json(
+                "/queue",
+                timeout=COMFY_STATUS_TIMEOUT_SECONDS,
+            )
+            if prompt_is_queued(queue_info, prompt_id):
+                return prompt_id
+        except urllib.error.HTTPError:
+            raise
+        except (TimeoutError, socket.timeout, ConnectionError, urllib.error.URLError):
+            pass
+        time.sleep(2)
+
+    raise gr.Error(
+        "ComfyUI did not confirm whether the image was queued. "
+        "No duplicate was submitted. Check the queue before retrying."
+    )
 
 
 def wait_for_prompt(prompt_id, poll_seconds=2):

@@ -197,7 +197,26 @@ ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p "${port
   nohup python3 main.py --listen 0.0.0.0 --port 8188 --enable-cors-header --disable-dynamic-vram \
     > /workspace/logs/comfyui.log 2>&1 < /dev/null &
   echo $! > /workspace/logs/comfyui.pid
-  sleep 12
+
+  comfy_ready=0
+  for wait_step in $(seq 1 240); do
+    server_ready=0
+    manager_ready=0
+    curl -fsS --max-time 2 http://127.0.0.1:8188/system_stats >/dev/null 2>&1 && server_ready=1
+    if [ ! -d "$comfy_dir/custom_nodes/ComfyUI-Manager" ] || grep -q "All startup tasks have been completed" /workspace/logs/comfyui.log; then
+      manager_ready=1
+    fi
+    if [ "$server_ready" -eq 1 ] && [ "$manager_ready" -eq 1 ]; then
+      comfy_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$comfy_ready" -ne 1 ]; then
+    echo "ComfyUI did not become fully ready within 240 seconds."
+    tail -100 /workspace/logs/comfyui.log
+    exit 1
+  fi
 
   nohup python3 /workspace/simple_firered_ui.py \
     > /workspace/logs/simple_firered_ui.log 2>&1 < /dev/null &
