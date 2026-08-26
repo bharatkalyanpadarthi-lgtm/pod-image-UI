@@ -11,6 +11,8 @@ This repo contains the FireRed image-editing Gradio UI and the operational scrip
 - `scripts/setup_pod_firered.sh` - Installs/downloads FireRed model files and useful ComfyUI nodes on a pod.
 - `scripts/run_simple_ui_on_pod.sh` - Older helper for starting the UI on a pod.
 
+The launcher disables ComfyUI DynamicVRAM because it can stall FireRed/Qwen model initialization on A100 80 GB pods. ComfyUI's standard model loader is used instead.
+
 ## Required Local Setup
 
 Install/configure RunPod CLI or place `runpodctl` at:

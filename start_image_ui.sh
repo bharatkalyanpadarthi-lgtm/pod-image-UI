@@ -194,7 +194,7 @@ ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p "${port
   fi
 
   cd "$comfy_dir"
-  nohup python3 main.py --listen 0.0.0.0 --port 8188 --enable-cors-header \
+  nohup python3 main.py --listen 0.0.0.0 --port 8188 --enable-cors-header --disable-dynamic-vram \
     > /workspace/logs/comfyui.log 2>&1 < /dev/null &
   echo $! > /workspace/logs/comfyui.pid
   sleep 12
