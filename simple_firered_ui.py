@@ -3,8 +3,10 @@ import datetime as dt
 import json
 import os
 import shutil
+import socket
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -42,6 +44,8 @@ WORKSPACE_OUTPUT_DIR = Path("/workspace/output")
 LORA_NAME = "FireRed-Image-Edit-1.1-Lightning-8steps-v1.2.safetensors"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 AUTO_DOWNLOAD_CHUNK_SIZE = 50
+COMFY_STATUS_TIMEOUT_SECONDS = float(os.environ.get("FIRERED_STATUS_TIMEOUT_SECONDS", "10"))
+COMFY_PROMPT_TIMEOUT_SECONDS = float(os.environ.get("FIRERED_PROMPT_TIMEOUT_SECONDS", "3600"))
 RUN_STATE = {
     "stop_requested": False,
     "run_dir": None,
@@ -392,10 +396,10 @@ def select_output_run(choice):
     return [str(path) for path in images], str(zip_path) if zip_path else None, status
 
 
-def http_json(path, payload=None):
+def http_json(path, payload=None, timeout=30):
     url = f"{COMFY}{path}"
     if payload is None:
-        with urllib.request.urlopen(url, timeout=30) as response:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
             return json.loads(response.read())
 
     data = json.dumps(payload).encode("utf-8")
@@ -404,7 +408,7 @@ def http_json(path, payload=None):
         data=data,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read())
 
 
@@ -413,9 +417,32 @@ def queue_prompt(prompt):
 
 
 def wait_for_prompt(prompt_id, poll_seconds=2):
+    deadline = time.monotonic() + COMFY_PROMPT_TIMEOUT_SECONDS
+    transient_failures = 0
     while True:
         raise_if_stopped()
-        history = http_json(f"/history/{prompt_id}")
+        if time.monotonic() >= deadline:
+            raise gr.Error(
+                "ComfyUI did not finish this image within "
+                f"{int(COMFY_PROMPT_TIMEOUT_SECONDS // 60)} minutes. "
+                "The job may still be running; check the queue or use Stop now before retrying."
+            )
+        try:
+            history = http_json(
+                f"/history/{prompt_id}",
+                timeout=COMFY_STATUS_TIMEOUT_SECONDS,
+            )
+            transient_failures = 0
+        except (TimeoutError, socket.timeout, ConnectionError, urllib.error.URLError) as exc:
+            transient_failures += 1
+            if transient_failures == 1 or transient_failures % 6 == 0:
+                print(
+                    "ComfyUI status check temporarily unavailable "
+                    f"for prompt {prompt_id} (attempt {transient_failures}): {exc}",
+                    flush=True,
+                )
+            time.sleep(poll_seconds)
+            continue
         if prompt_id in history:
             return history[prompt_id]
         time.sleep(poll_seconds)
