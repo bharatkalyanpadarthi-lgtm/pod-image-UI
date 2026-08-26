@@ -1069,7 +1069,7 @@ def edit_directory(input_dir, output_dir, prompt, ref2, ref3, steps, guidance, s
     return results, str(zip_path)
 
 
-with gr.Blocks(title="FireRed Simple Editor", css=MOBILE_CSS, elem_id="firered-app") as demo:
+with gr.Blocks(title="FireRed Simple Editor", elem_id="firered-app") as demo:
     gr.Markdown("# FireRed Simple Editor")
     gr.Markdown("Upload image(s), enter one edit prompt, run, then download the result.")
 
@@ -1345,5 +1345,6 @@ if __name__ == "__main__":
     demo.queue(default_concurrency_limit=1).launch(
         server_name="0.0.0.0",
         server_port=7860,
+        css=MOBILE_CSS,
         allowed_paths=[str(OUTPUT_DIR), str(COMFY_OUTPUT_DIR), "/workspace", "/tmp"],
     )

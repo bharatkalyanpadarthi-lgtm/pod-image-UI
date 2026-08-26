@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-RUNPOD_POD_ID="${RUNPOD_POD_ID:-gn2amles40o78d}"
+RUNPOD_POD_ID="${RUNPOD_POD_ID:-2bjgj04g6hdkci}"
 MAX_WAIT_MINUTES="${MAX_WAIT_MINUTES:-20}"
 POLL_SECONDS="${POLL_SECONDS:-10}"
 UI_SCRIPT="${UI_SCRIPT:-${SCRIPT_DIR}/simple_firered_ui.py}"
