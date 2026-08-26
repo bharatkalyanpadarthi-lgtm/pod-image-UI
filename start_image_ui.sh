@@ -219,10 +219,22 @@ ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p "${port
     fi
   done
 
-  nohup python3 /workspace/simple_firered_ui.py \
+  nohup python3 -u /workspace/simple_firered_ui.py \
     > /workspace/logs/simple_firered_ui.log 2>&1 < /dev/null &
   echo $! > /workspace/logs/simple_firered_ui.pid
-  sleep 5
+  ui_ready=0
+  for wait_step in $(seq 1 60); do
+    if curl -fsS --max-time 2 http://127.0.0.1:7860/ >/dev/null 2>&1; then
+      ui_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$ui_ready" -ne 1 ]; then
+    echo "FireRed UI did not become ready within 60 seconds."
+    tail -100 /workspace/logs/simple_firered_ui.log
+    exit 1
+  fi
 
   ps -p "$(cat /workspace/logs/simple_firered_ui.pid)" -o pid,cmd
 '
