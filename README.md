@@ -13,6 +13,14 @@ This repo contains the FireRed image-editing Gradio UI and the operational scrip
 
 The launcher disables ComfyUI DynamicVRAM because it can stall FireRed/Qwen model initialization on A100 80 GB pods. Normal FireRed launches also disable custom nodes because the image-edit workflow uses ComfyUI's built-in nodes; this avoids unrelated Manager downloads and broken optional-node imports. Before reporting ready, the launcher verifies the exact nodes required by FireRed.
 
+The launcher pins the verified Gradio and Pillow versions so restarts do not silently change the runtime. Before ComfyUI starts, any crash-leftover `simple_*` working inputs are moved, never permanently deleted, to:
+
+```text
+/workspace/simple_firered/ready_to_delete/comfy_temp_inputs/<timestamp>/
+```
+
+Each archive includes `manifest.tsv`. Legacy reference intermediates are archived the same way under `ready_to_delete/reference_intermediates/`. During normal operation, per-image working inputs are removed as soon as ComfyUI reports completion, and optional references are limited to the current run.
+
 ## Required Local Setup
 
 Install/configure RunPod CLI or place `runpodctl` at:

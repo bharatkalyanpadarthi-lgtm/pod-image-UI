@@ -47,14 +47,18 @@ AUTO_DOWNLOAD_CHUNK_SIZE = 50
 COMFY_STATUS_TIMEOUT_SECONDS = float(os.environ.get("FIRERED_STATUS_TIMEOUT_SECONDS", "10"))
 COMFY_SUBMIT_TIMEOUT_SECONDS = float(os.environ.get("FIRERED_SUBMIT_TIMEOUT_SECONDS", "45"))
 COMFY_SUBMIT_RECOVERY_SECONDS = float(os.environ.get("FIRERED_SUBMIT_RECOVERY_SECONDS", "180"))
-COMFY_PROMPT_TIMEOUT_SECONDS = float(os.environ.get("FIRERED_PROMPT_TIMEOUT_SECONDS", "3600"))
+COMFY_COLD_PROMPT_TIMEOUT_SECONDS = float(os.environ.get("FIRERED_COLD_PROMPT_TIMEOUT_SECONDS", "1200"))
+COMFY_WARM_PROMPT_TIMEOUT_SECONDS = float(os.environ.get("FIRERED_WARM_PROMPT_TIMEOUT_SECONDS", "300"))
+COMFY_WARM_STATUS_FAILURE_SECONDS = float(os.environ.get("FIRERED_WARM_STATUS_FAILURE_SECONDS", "120"))
 RUN_STATE = {
     "stop_requested": False,
     "run_dir": None,
     "results": [],
     "label": "No active run.",
     "last_error": "",
+    "successful_prompts": 0,
 }
+ACTIVE_REFERENCE_INPUTS = set()
 
 PROMPT_PRESETS = {
     "Custom": "",
@@ -183,8 +187,21 @@ MOBILE_CSS = """
 """
 
 DISALLOWED_PROMPT_TERMS = {
+    "bare breasts",
+    "boobs",
+    "breasts exposed",
     "explicit",
+    "genitals",
+    "make her nude",
+    "make him nude",
+    "naked",
+    "nude",
     "porn",
+    "remove all clothes",
+    "remove all her clothes",
+    "remove all his clothes",
+    "remove clothes",
+    "undress",
 }
 
 BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -221,6 +238,17 @@ def interrupt_comfy():
         http_json("/queue", {"clear": True})
     except Exception:
         pass
+
+
+def interrupt_prompt(prompt_id):
+    try:
+        http_json(
+            "/interrupt",
+            {"prompt_id": prompt_id},
+            timeout=COMFY_STATUS_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        print(f"Could not interrupt stalled prompt {prompt_id}: {exc}", flush=True)
 
 
 def partial_zip_from_state():
@@ -473,15 +501,21 @@ def queue_prompt(prompt):
 
 
 def wait_for_prompt(prompt_id, poll_seconds=2):
-    deadline = time.monotonic() + COMFY_PROMPT_TIMEOUT_SECONDS
+    cold_start = RUN_STATE.get("successful_prompts", 0) == 0
+    timeout_seconds = (
+        COMFY_COLD_PROMPT_TIMEOUT_SECONDS if cold_start else COMFY_WARM_PROMPT_TIMEOUT_SECONDS
+    )
+    deadline = time.monotonic() + timeout_seconds
     transient_failures = 0
+    first_status_failure = None
     while True:
         raise_if_stopped()
         if time.monotonic() >= deadline:
+            interrupt_prompt(prompt_id)
             raise gr.Error(
                 "ComfyUI did not finish this image within "
-                f"{int(COMFY_PROMPT_TIMEOUT_SECONDS // 60)} minutes. "
-                "The job may still be running; check the queue or use Stop now before retrying."
+                f"{int(timeout_seconds // 60)} minutes, so the stalled job was interrupted. "
+                "Wait for the queue to become empty before retrying."
             )
         try:
             history = http_json(
@@ -489,14 +523,25 @@ def wait_for_prompt(prompt_id, poll_seconds=2):
                 timeout=COMFY_STATUS_TIMEOUT_SECONDS,
             )
             transient_failures = 0
+            first_status_failure = None
         except (TimeoutError, socket.timeout, ConnectionError, urllib.error.URLError) as exc:
             transient_failures += 1
+            first_status_failure = first_status_failure or time.monotonic()
             if transient_failures == 1 or transient_failures % 6 == 0:
                 print(
                     "ComfyUI status check temporarily unavailable "
                     f"for prompt {prompt_id} (attempt {transient_failures}): {exc}",
                     flush=True,
                 )
+            if (
+                not cold_start
+                and time.monotonic() - first_status_failure >= COMFY_WARM_STATUS_FAILURE_SECONDS
+            ):
+                interrupt_prompt(prompt_id)
+                raise gr.Error(
+                    "ComfyUI stopped responding while processing this image. "
+                    "The job was interrupted; wait for the queue to clear before retrying."
+                ) from exc
             time.sleep(poll_seconds)
             continue
         if prompt_id in history:
@@ -505,7 +550,8 @@ def wait_for_prompt(prompt_id, poll_seconds=2):
 
 
 def copy_to_comfy_input(source_path):
-    dest_name = f"simple_{int(time.time() * 1000)}_{safe_name(source_path.name)}.png"
+    source_path = Path(source_path)
+    dest_name = f"simple_input_{uuid.uuid4().hex}_{safe_name(source_path.stem)}.png"
     dest = COMFY_INPUT_DIR / dest_name
     try:
         with Image.open(source_path) as image:
@@ -516,6 +562,19 @@ def copy_to_comfy_input(source_path):
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise gr.Error(f"Unreadable image skipped: {source_path} ({exc})") from exc
     return dest_name
+
+
+def cleanup_comfy_input(name):
+    if not name:
+        return
+    basename = Path(name).name
+    if basename != name or not basename.startswith(("simple_input_", "simple_ref_")):
+        print(f"Refusing to remove unmanaged ComfyUI input: {name}", flush=True)
+        return
+    try:
+        (COMFY_INPUT_DIR / basename).unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"Could not clean temporary ComfyUI input {basename}: {exc}", flush=True)
 
 
 def is_unreadable_image_error(exc):
@@ -539,11 +598,23 @@ def parse_prompts(prompt_text):
 def copy_optional_ref(image, name):
     if image is None:
         return None
-    ref_dir = BASE_DIR / "refs"
-    ref_dir.mkdir(parents=True, exist_ok=True)
-    source = ref_dir / f"{name}_{int(time.time() * 1000)}.png"
-    image.save(source)
-    return copy_to_comfy_input(source)
+    dest_name = f"simple_ref_{name}_{uuid.uuid4().hex}.png"
+    dest = COMFY_INPUT_DIR / dest_name
+    try:
+        if image.mode not in {"RGB", "RGBA"}:
+            image = image.convert("RGB")
+        image.save(dest, format="PNG")
+    except (AttributeError, OSError, ValueError) as exc:
+        raise gr.Error(f"Unreadable reference image: {exc}") from exc
+    ACTIVE_REFERENCE_INPUTS.add(dest_name)
+    return dest_name
+
+
+def prepare_optional_refs(ref2, ref3):
+    for name in list(ACTIVE_REFERENCE_INPUTS):
+        cleanup_comfy_input(name)
+        ACTIVE_REFERENCE_INPUTS.discard(name)
+    return copy_optional_ref(ref2, "ref2"), copy_optional_ref(ref3, "ref3")
 
 
 def add_reference_nodes(prompt_dict, ref2_name=None, ref3_name=None):
@@ -689,6 +760,10 @@ def history_error_message(history):
     status = history.get("status") or {}
     messages = status.get("messages") or []
     for message_type, message in reversed(messages):
+        if message_type == "execution_interrupted":
+            node = message.get("node_type") or message.get("node_id")
+            where = f" at {node}" if node else ""
+            return f"ComfyUI run was interrupted{where}. No output image was created."
         if message_type == "execution_error":
             node = message.get("node_type") or message.get("node_id") or "unknown node"
             error = message.get("exception_message") or message.get("exception_type") or "unknown error"
@@ -701,15 +776,23 @@ def history_error_message(history):
 
 def run_comfy_one(source_path, prompt, steps, guidance, seed, output_prefix, ref2_name=None, ref3_name=None):
     input_name = copy_to_comfy_input(source_path)
-    api_prompt = build_prompt_with_refs(input_name, prompt, output_prefix, steps, guidance, seed, ref2_name, ref3_name)
-    prompt_id = queue_prompt(api_prompt)
-    history = wait_for_prompt(prompt_id)
-    outputs = history_output_paths(history)
-    if not outputs:
-        if RUN_STATE.get("stop_requested"):
-            raise StopRequested()
-        raise gr.Error(history_error_message(history))
-    return outputs[-1]
+    history = None
+    try:
+        api_prompt = build_prompt_with_refs(input_name, prompt, output_prefix, steps, guidance, seed, ref2_name, ref3_name)
+        prompt_id = queue_prompt(api_prompt)
+        history = wait_for_prompt(prompt_id)
+        outputs = history_output_paths(history)
+        if not outputs:
+            if RUN_STATE.get("stop_requested"):
+                raise StopRequested()
+            raise gr.Error(history_error_message(history))
+        RUN_STATE["successful_prompts"] = RUN_STATE.get("successful_prompts", 0) + 1
+        return outputs[-1]
+    finally:
+        # Keep an input only when submission state is uncertain. Startup archives
+        # such crash leftovers before ComfyUI is launched again.
+        if history is not None:
+            cleanup_comfy_input(input_name)
 
 
 def make_zip(run_dir, paths):
@@ -748,8 +831,7 @@ def edit_single(image, prompt, ref2, ref3, steps, guidance, seed):
     source = run_dir / "input.png"
     image.save(source)
 
-    ref2_name = copy_optional_ref(ref2, "ref2")
-    ref3_name = copy_optional_ref(ref3, "ref3")
+    ref2_name, ref3_name = prepare_optional_refs(ref2, ref3)
     results = []
     skipped_errors = []
 
@@ -782,8 +864,7 @@ def edit_batch(files, prompt, ref2, ref3, steps, guidance, seed, progress=gr.Pro
     run_dir = OUTPUT_DIR / dt.datetime.now().strftime("batch_%Y%m%d_%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
     set_run_state(run_dir=run_dir, results=[], label=f"Running {run_dir.name}", stop_requested=False)
-    ref2_name = copy_optional_ref(ref2, "ref2")
-    ref3_name = copy_optional_ref(ref3, "ref3")
+    ref2_name, ref3_name = prepare_optional_refs(ref2, ref3)
     results = []
 
     try:
@@ -897,8 +978,7 @@ def edit_uploaded_folder(files, output_name, batch_size, start_index, skip_compl
     run_dir.mkdir(parents=True, exist_ok=True)
     set_run_state(run_dir=run_dir, results=[], label=f"Running {run_dir.name}", stop_requested=False)
 
-    ref2_name = copy_optional_ref(ref2, "ref2")
-    ref3_name = copy_optional_ref(ref3, "ref3")
+    ref2_name, ref3_name = prepare_optional_refs(ref2, ref3)
     results = []
 
     existing_paths = output_image_paths(run_dir) if skip_completed else []
@@ -989,8 +1069,7 @@ def edit_uploaded_folder_all(files, output_name, skip_completed, prompt, ref2, r
     output_root.mkdir(parents=True, exist_ok=True)
 
     set_run_state(run_dir=output_root, results=[], label=f"Running all images into {output_root.name}", stop_requested=False)
-    ref2_name = copy_optional_ref(ref2, "ref2")
-    ref3_name = copy_optional_ref(ref3, "ref3")
+    ref2_name, ref3_name = prepare_optional_refs(ref2, ref3)
 
     results = []
     chunk_zips = []
@@ -1107,8 +1186,7 @@ def edit_directory(input_dir, output_dir, prompt, ref2, ref3, steps, guidance, s
 
     prompts = parse_prompts(prompt)
     out_dir.mkdir(parents=True, exist_ok=True)
-    ref2_name = copy_optional_ref(ref2, "ref2")
-    ref3_name = copy_optional_ref(ref3, "ref3")
+    ref2_name, ref3_name = prepare_optional_refs(ref2, ref3)
 
     images = sorted(path for path in in_dir.rglob("*") if is_supported_image(path))
     if limit and int(limit) > 0:

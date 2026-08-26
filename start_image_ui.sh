@@ -166,10 +166,12 @@ fi
 ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p "${port}" "root@${ip}" '
   set -e
   mkdir -p /workspace/logs
-  python3 -m pip install -U gradio pillow >/workspace/logs/simple_firered_ui_pip.log 2>&1 || {
-    tail -80 /workspace/logs/simple_firered_ui_pip.log
-    exit 1
-  }
+  if ! python3 -c '\''import gradio, PIL; assert gradio.__version__ == "6.26.0"; assert PIL.__version__ == "12.3.0"'\''; then
+    python3 -m pip install "gradio==6.26.0" "pillow==12.3.0" >/workspace/logs/simple_firered_ui_pip.log 2>&1 || {
+      tail -80 /workspace/logs/simple_firered_ui_pip.log
+      exit 1
+    }
+  fi
 
   if [ -f /workspace/logs/comfyui.pid ]; then
     old="$(cat /workspace/logs/comfyui.pid || true)"
@@ -191,6 +193,38 @@ ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p "${port
   if [ -z "$comfy_dir" ]; then
     echo "Could not find ComfyUI directory on pod."
     exit 1
+  fi
+
+  input_dir="$comfy_dir/input"
+  mkdir -p "$input_dir"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  orphan_count="$(find "$input_dir" -maxdepth 1 -type f -name "simple_*" -printf "." | wc -c | tr -d " ")"
+  if [ "$orphan_count" -gt 0 ]; then
+    archive_dir="/workspace/simple_firered/ready_to_delete/comfy_temp_inputs/$stamp"
+    mkdir -p "$archive_dir"
+    printf "source_path\tdestination_path\tsize_bytes\treason\tarchived_at_utc\n" > "$archive_dir/manifest.tsv"
+    find "$input_dir" -maxdepth 1 -type f -name "simple_*" \
+      -printf "$input_dir/%f\t$archive_dir/%f\t%s\tstartup_orphan\t$stamp\n" \
+      >> "$archive_dir/manifest.tsv"
+    find "$input_dir" -maxdepth 1 -type f -name "simple_*" -exec mv -t "$archive_dir" -- {} +
+    echo "Archived $orphan_count stale FireRed input file(s) to $archive_dir"
+  else
+    echo "No stale FireRed input files found."
+  fi
+
+  old_ref_dir="/workspace/simple_firered/refs"
+  if [ -d "$old_ref_dir" ]; then
+    old_ref_count="$(find "$old_ref_dir" -maxdepth 1 -type f -printf "." | wc -c | tr -d " ")"
+    if [ "$old_ref_count" -gt 0 ]; then
+      ref_archive_dir="/workspace/simple_firered/ready_to_delete/reference_intermediates/$stamp"
+      mkdir -p "$ref_archive_dir"
+      printf "source_path\tdestination_path\tsize_bytes\treason\tarchived_at_utc\n" > "$ref_archive_dir/manifest.tsv"
+      find "$old_ref_dir" -maxdepth 1 -type f \
+        -printf "$old_ref_dir/%f\t$ref_archive_dir/%f\t%s\tlegacy_reference_intermediate\t$stamp\n" \
+        >> "$ref_archive_dir/manifest.tsv"
+      find "$old_ref_dir" -maxdepth 1 -type f -exec mv -t "$ref_archive_dir" -- {} +
+      echo "Archived $old_ref_count legacy reference file(s) to $ref_archive_dir"
+    fi
   fi
 
   cd "$comfy_dir"
