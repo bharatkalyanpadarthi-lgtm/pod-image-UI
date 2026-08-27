@@ -187,21 +187,7 @@ MOBILE_CSS = """
 """
 
 DISALLOWED_PROMPT_TERMS = {
-    "bare breasts",
-    "boobs",
-    "breasts exposed",
     "explicit",
-    "genitals",
-    "make her nude",
-    "make him nude",
-    "naked",
-    "nude",
-    "porn",
-    "remove all clothes",
-    "remove all her clothes",
-    "remove all his clothes",
-    "remove clothes",
-    "undress",
 }
 
 BASE_DIR.mkdir(parents=True, exist_ok=True)
