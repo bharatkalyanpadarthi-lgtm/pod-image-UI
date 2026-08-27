@@ -184,7 +184,7 @@ ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p "${port
   sleep 2
 
   comfy_dir=""
-  for dir in /workspace/runpod-slim/ComfyUI /workspace/ComfyUI /ComfyUI; do
+  for dir in /workspace/runpod-slim/ComfyUI_firered_clean /workspace/runpod-slim/ComfyUI /workspace/ComfyUI /ComfyUI; do
     if [ -d "$dir" ]; then
       comfy_dir="$dir"
       break
@@ -228,13 +228,55 @@ ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p "${port
   fi
 
   cd "$comfy_dir"
+  if ! python3 - <<'PY'
+import comfy_kitchen
+raise SystemExit(0 if hasattr(comfy_kitchen, "int8_attention_is_available") else 1)
+PY
+  then
+    echo "Refreshing ComfyUI Python requirements for this checkout."
+    python3 -m pip install -r requirements.txt >/workspace/logs/comfyui_requirements_install.log 2>&1 || {
+      tail -120 /workspace/logs/comfyui_requirements_install.log
+      exit 1
+    }
+  fi
+
+  python3 - <<'PY'
+from pathlib import Path
+
+server_path = Path("server.py")
+jobs_path = Path("comfy_execution/jobs.py")
+if server_path.exists() and jobs_path.exists():
+    server_text = server_path.read_text(errors="replace")
+    jobs_text = jobs_path.read_text(errors="replace")
+    if "validate_job_id" in server_text and "def validate_job_id(" not in jobs_text:
+        marker = "\n\ndef normalize_queue_item"
+        helper = """
+
+
+def validate_job_id(job_id):
+    \"\"\"Return a non-empty string job id or raise ValueError.
+
+    Compatibility helper for ComfyUI server.py versions that expect this
+    function from comfy_execution.jobs.
+    \"\"\"
+    if not isinstance(job_id, str) or not job_id.strip():
+        raise ValueError("job_id must be a non-empty string")
+    return job_id.strip()
+"""
+        if marker not in jobs_text:
+            raise SystemExit("Could not patch ComfyUI: normalize_queue_item marker missing")
+        jobs_path.write_text(jobs_text.replace(marker, helper + marker))
+        print("Patched ComfyUI validate_job_id compatibility helper.")
+PY
+  python3 -m py_compile server.py comfy_execution/jobs.py
+
   nohup python3 main.py --listen 0.0.0.0 --port 8188 --enable-cors-header \
     --disable-dynamic-vram --disable-all-custom-nodes \
     > /workspace/logs/comfyui.log 2>&1 < /dev/null &
   echo $! > /workspace/logs/comfyui.pid
 
   comfy_ready=0
-  for wait_step in $(seq 1 120); do
+  for wait_step in $(seq 1 600); do
     if curl -fsS --max-time 2 http://127.0.0.1:8188/system_stats >/dev/null 2>&1; then
       comfy_ready=1
       break
@@ -242,7 +284,7 @@ ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p "${port
     sleep 1
   done
   if [ "$comfy_ready" -ne 1 ]; then
-    echo "ComfyUI did not become ready within 120 seconds."
+    echo "ComfyUI did not become ready within 600 seconds."
     tail -100 /workspace/logs/comfyui.log
     exit 1
   fi
@@ -257,7 +299,7 @@ ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p "${port
     > /workspace/logs/simple_firered_ui.log 2>&1 < /dev/null &
   echo $! > /workspace/logs/simple_firered_ui.pid
   ui_ready=0
-  for wait_step in $(seq 1 60); do
+  for wait_step in $(seq 1 180); do
     if curl -fsS --max-time 2 http://127.0.0.1:7860/ >/dev/null 2>&1; then
       ui_ready=1
       break
@@ -265,7 +307,7 @@ ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p "${port
     sleep 1
   done
   if [ "$ui_ready" -ne 1 ]; then
-    echo "FireRed UI did not become ready within 60 seconds."
+    echo "FireRed UI did not become ready within 180 seconds."
     tail -100 /workspace/logs/simple_firered_ui.log
     exit 1
   fi
