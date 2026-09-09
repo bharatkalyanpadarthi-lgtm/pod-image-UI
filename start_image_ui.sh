@@ -181,6 +181,33 @@ ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p "${port
     old="$(cat /workspace/logs/comfyui.pid || true)"
     [ -n "$old" ] && kill "$old" 2>/dev/null || true
   fi
+  # Fresh RunPod containers may auto-start ComfyUI without our PID file.
+  # Stop only main.py processes rooted in a known ComfyUI checkout.
+  managed_comfy_pids=""
+  for proc_dir in /proc/[0-9]*; do
+    pid="${proc_dir##*/}"
+    cmdline="$(tr "\0" " " < "$proc_dir/cmdline" 2>/dev/null || true)"
+    case "$cmdline" in
+      *"main.py"*) ;;
+      *) continue ;;
+    esac
+    process_cwd="$(readlink -f "$proc_dir/cwd" 2>/dev/null || true)"
+    case "$process_cwd" in
+      /workspace/runpod-slim/ComfyUI|/workspace/runpod-slim/ComfyUI_firered_clean|/workspace/ComfyUI|/ComfyUI)
+        kill "$pid" 2>/dev/null || true
+        managed_comfy_pids="$managed_comfy_pids $pid"
+        ;;
+    esac
+  done
+  for pid in $managed_comfy_pids; do
+    for wait_step in $(seq 1 20); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
   if [ -f /workspace/logs/simple_firered_ui.pid ]; then
     old="$(cat /workspace/logs/simple_firered_ui.pid || true)"
     [ -n "$old" ] && kill "$old" 2>/dev/null || true
@@ -274,6 +301,21 @@ def validate_job_id(job_id):
 PY
   python3 -m py_compile server.py comfy_execution/jobs.py
 
+  python3 - <<'PY'
+import torch
+
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is unavailable to the ComfyUI Python runtime")
+x = torch.randn((512, 512), device="cuda", dtype=torch.float16)
+y = x @ x
+torch.cuda.synchronize()
+print(
+    "CUDA preflight OK: "
+    f"driver-compatible PyTorch {torch.__version__}, runtime {torch.version.cuda}, "
+    f"GPU {torch.cuda.get_device_name(0)}, result {float(y[0, 0]):.4f}"
+)
+PY
+
   nohup python3 main.py --listen 0.0.0.0 --port 8188 --enable-cors-header \
     --disable-dynamic-vram --disable-all-custom-nodes \
     > /workspace/logs/comfyui.log 2>&1 < /dev/null &
@@ -289,6 +331,12 @@ PY
   done
   if [ "$comfy_ready" -ne 1 ]; then
     echo "ComfyUI did not become ready within 600 seconds."
+    tail -100 /workspace/logs/comfyui.log
+    exit 1
+  fi
+  comfy_pid="$(cat /workspace/logs/comfyui.pid)"
+  if ! kill -0 "$comfy_pid" 2>/dev/null; then
+    echo "The newly launched ComfyUI process exited; refusing a false ready state."
     tail -100 /workspace/logs/comfyui.log
     exit 1
   fi
