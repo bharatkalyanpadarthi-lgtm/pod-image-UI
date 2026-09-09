@@ -56,7 +56,11 @@ req = urllib.request.Request(
     url,
     data=b"",
     method="POST",
-    headers={"Authorization": f"Bearer {api_key}"},
+    headers={
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "User-Agent": "pod-image-ui-launcher/1.0",
+    },
 )
 try:
     with urllib.request.urlopen(req, timeout=30) as resp:
