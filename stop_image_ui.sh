@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-RUNPOD_POD_ID="${RUNPOD_POD_ID:-ofyqo6s4q3wvvt}"
+RUNPOD_POD_ID="${RUNPOD_POD_ID:-tcqjvnm1tfnu5u}"
 
 if [ -x "${SCRIPT_DIR}/.bin/runpodctl" ]; then
   RUNPODCTL="${RUNPODCTL:-${SCRIPT_DIR}/.bin/runpodctl}"
