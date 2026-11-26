@@ -7,7 +7,7 @@ This repo contains the FireRed image-editing Gradio UI and the operational scrip
 - `simple_firered_ui.py` - FireRed Simple Editor UI.
 - `simple_wan_video_ui.py` - Optional video UI loaded by the simple editor when present on the pod.
 - `start_image_ui.sh` - Starts the saved RunPod pod, uploads the UI files, starts ComfyUI, and starts the Gradio UI.
-- `stop_image_ui.sh` - Stops the saved RunPod pod. Includes a REST API fallback because some local `runpodctl` copies can silently return no status.
+- `stop_image_ui.sh` - Stops the saved RunPod pod through REST API v2, confirms EXITED, and estimates the session cost.
 - `scripts/setup_pod_firered.sh` - Installs/downloads FireRed model files and useful ComfyUI nodes on a pod.
 - `scripts/run_simple_ui_on_pod.sh` - Older helper for starting the UI on a pod.
 
@@ -23,13 +23,14 @@ Each archive includes `manifest.tsv`. Legacy reference intermediates are archive
 
 ## Required Local Setup
 
-Install/configure RunPod CLI or place `runpodctl` at:
+Install Python 3 and configure a Runpod API key in `~/.runpod/config.toml`
+(`apikey = '...'`) or set `RUNPOD_API_KEY` in your environment. The scripts
+use `https://api.runpod.io/v2` directly; the retired v1 API and old CLI
+copies are no longer used.
 
-```bash
-.bin/runpodctl
-```
-
-The scripts also support a global `runpodctl` on `PATH`.
+Stop costs use the API start timestamp and the time EXITED is observed.
+API v2 does not return a stop timestamp, so a repeated stop of an already
+stopped pod cannot recalculate its previous session cost.
 
 SSH defaults to:
 
